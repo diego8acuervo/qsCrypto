@@ -50,3 +50,8 @@ OUTPUT_RESULTS_DIR = os.environ.get("QSCRYPTO_OUTPUT_RESULTS_DIR", None)
 # ── Account settings ─────────────────────────────────────────────
 BASE_CURRENCY = "USDT"
 EQUITY = Decimal("100000.00")
+
+# ── CoinAPI settings ─────────────────────────────────────────────
+COINAPI_KEY = os.environ.get("COINAPI_KEY", "")
+COINAPI_REST_URL = os.environ.get("COINAPI_REST_URL", "https://rest.coinapi.io/v1")
+COINAPI_WS_URL = os.environ.get("COINAPI_WS_URL", "wss://ws.coinapi.io/v1/")

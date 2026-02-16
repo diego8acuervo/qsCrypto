@@ -2,6 +2,8 @@ from __future__ import print_function
 
 import datetime
 from decimal import Decimal, getcontext, ROUND_HALF_DOWN
+import json
+import logging
 import os
 import os.path
 import re
@@ -9,6 +11,8 @@ import time
 
 import numpy as np
 import pandas as pd
+import requests
+import websocket
 
 from qsCrypto import settings
 from qsCrypto.event.event import TickEvent
@@ -200,3 +204,376 @@ class HistoricCSVPriceHandler(PriceHandler):
         # Create the tick event for the queue
         tev = TickEvent(pair, index, bid, ask)
         self.events_queue.put(tev)
+
+
+# ── CoinAPI symbol‐id helpers ────────────────────────────────────
+
+def _pair_to_coinapi_symbol(pair, exchange="BINANCE", market="SPOT"):
+    """
+    Convert an internal pair like "BTCUSDT" into a CoinAPI symbol_id
+    such as "BINANCEFTS_PERP_BTC_USDT" or "BINANCE_SPOT_BTC_USDT".
+
+    For perpetual futures use market="PERP" and exchange="BINANCEFTS".
+    """
+    # Heuristic: quote currencies that are 4 chars (USDT, USDC, BUSD)
+    if pair.endswith(("USDT", "USDC", "BUSD")):
+        base, quote = pair[:-4], pair[-4:]
+    else:
+        base, quote = pair[:-3], pair[-3:]
+    return f"{exchange}_{market}_{base}_{quote}"
+
+
+def _coinapi_symbol_to_pair(symbol_id):
+    """
+    Convert a CoinAPI symbol_id like "BINANCE_SPOT_BTC_USDT" back
+    to the internal pair format "BTCUSDT".
+    """
+    parts = symbol_id.split("_")
+    # Format: EXCHANGE_MARKET_BASE_QUOTE  (at minimum 4 parts)
+    if len(parts) >= 4:
+        return parts[-2] + parts[-1]
+    return symbol_id
+
+
+class CoinAPIPriceHandler(PriceHandler):
+    """
+    CoinAPI price handler that can:
+      1. Download historical OHLCV / quote data via the REST API
+      2. Stream real-time quote (bid/ask) data via the WebSocket API
+
+    Both modes produce TickEvents compatible with the rest of qsCrypto.
+
+    Parameters
+    ----------
+    pairs : list[str]
+        Internal pair names, e.g. ["BTCUSDT", "ETHUSDT"].
+    events_queue : queue.Queue
+        The events queue shared with the trading loop.
+    api_key : str
+        CoinAPI API key.
+    exchange : str
+        Exchange identifier used in CoinAPI symbol ids (default "BINANCE").
+    market : str
+        Market type for symbol ids: "SPOT", "PERP", etc. (default "SPOT").
+    rest_base_url : str
+        Base URL for the CoinAPI REST API.
+    ws_url : str
+        WebSocket endpoint for real-time streaming.
+    heartbeat : bool
+        Whether to request heartbeat messages from the WebSocket.
+    """
+
+    REST_BASE_URL = "https://rest.coinapi.io/v1"
+    WS_URL = "wss://ws.coinapi.io/v1/"
+
+    def __init__(
+        self,
+        pairs,
+        events_queue,
+        api_key=None,
+        exchange="BINANCE",
+        market="SPOT",
+        rest_base_url=None,
+        ws_url=None,
+        heartbeat=True,
+    ):
+        self.pairs = pairs
+        self.events_queue = events_queue
+        self.api_key = api_key or os.environ.get("COINAPI_KEY", "")
+        self.exchange = exchange
+        self.market = market
+        self.rest_base_url = rest_base_url or self.REST_BASE_URL
+        self.ws_url = ws_url or self.WS_URL
+        self.heartbeat = heartbeat
+        self.prices = self._set_up_prices_dict()
+        self.logger = logging.getLogger(__name__)
+        self.ws = None
+        self.continue_backtest = True
+
+        # Map CoinAPI symbol_id → internal pair for fast WS lookups
+        self._symbol_map = {
+            _pair_to_coinapi_symbol(p, exchange, market): p
+            for p in self.pairs
+        }
+
+    def _set_up_prices_dict(self):
+        """
+        For crypto we only need one entry per pair (no inverse).
+        """
+        return {
+            p: {"bid": None, "ask": None, "time": None}
+            for p in self.pairs
+        }
+
+    # ── REST helpers ──────────────────────────────────────────────
+
+    def _rest_headers(self):
+        return {
+            "X-CoinAPI-Key": self.api_key,
+            "Accept": "application/json",
+        }
+
+    def _rest_get(self, path, params=None):
+        """
+        Generic GET against the CoinAPI REST API.
+        Returns the parsed JSON response.
+        """
+        url = f"{self.rest_base_url}{path}"
+        self.logger.debug("CoinAPI REST GET %s params=%s", url, params)
+        resp = requests.get(url, headers=self._rest_headers(), params=params)
+        resp.raise_for_status()
+        return resp.json()
+
+    # ── Historical OHLCV ──────────────────────────────────────────
+
+    def get_historical_ohlcv(
+        self,
+        pair,
+        period_id="1MIN",
+        time_start=None,
+        time_end=None,
+        limit=1000,
+    ):
+        """
+        Download OHLCV timeseries for *pair* from the CoinAPI REST API.
+
+        Parameters
+        ----------
+        pair : str       – e.g. "BTCUSDT"
+        period_id : str  – e.g. "1SEC", "1MIN", "5MIN", "1HRS", "1DAY"
+        time_start : str – ISO‑8601 start time (optional)
+        time_end : str   – ISO‑8601 end time (optional)
+        limit : int      – max rows to return (max 100000)
+
+        Returns
+        -------
+        pd.DataFrame with columns:
+            time_period_start, time_period_end, time_open, time_close,
+            price_open, price_high, price_low, price_close,
+            volume_traded, trades_count
+        """
+        symbol_id = _pair_to_coinapi_symbol(pair, self.exchange, self.market)
+        params = {"period_id": period_id, "limit": limit}
+        if time_start:
+            params["time_start"] = time_start
+        if time_end:
+            params["time_end"] = time_end
+
+        data = self._rest_get(f"/ohlcv/{symbol_id}/history", params)
+        df = pd.DataFrame(data)
+        if not df.empty:
+            for col in ("time_period_start", "time_period_end", "time_open", "time_close"):
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col])
+            df.set_index("time_period_start", inplace=True)
+        return df
+
+    # ── Historical Quotes ─────────────────────────────────────────
+
+    def get_historical_quotes(
+        self,
+        pair,
+        date=None,
+        time_start=None,
+        time_end=None,
+        limit=1000,
+    ):
+        """
+        Download historical quote (bid/ask) updates for *pair*.
+
+        Parameters
+        ----------
+        pair : str       – e.g. "BTCUSDT"
+        date : str       – ISO‑8601 date for a full day (preferred)
+        time_start : str – ISO‑8601 start (must be same day as time_end)
+        time_end : str   – ISO‑8601 end
+        limit : int      – max rows (max 100000)
+
+        Returns
+        -------
+        pd.DataFrame with columns:
+            symbol_id, time_exchange, time_coinapi,
+            ask_price, ask_size, bid_price, bid_size
+        """
+        symbol_id = _pair_to_coinapi_symbol(pair, self.exchange, self.market)
+        params = {"limit": limit}
+        if date:
+            params["date"] = date
+        if time_start:
+            params["time_start"] = time_start
+        if time_end:
+            params["time_end"] = time_end
+
+        data = self._rest_get(f"/quotes/{symbol_id}/history", params)
+        df = pd.DataFrame(data)
+        if not df.empty:
+            for col in ("time_exchange", "time_coinapi"):
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col])
+            df.set_index("time_exchange", inplace=True)
+        return df
+
+    # ── Historical quote replay (backtest) ────────────────────────
+
+    def load_historical_quotes_for_backtest(
+        self,
+        date=None,
+        time_start=None,
+        time_end=None,
+        limit=100000,
+    ):
+        """
+        Load historical quotes for all pairs, merge them
+        chronologically, and store an iterator for replay
+        via ``stream_next_tick()``.
+        """
+        frames = []
+        for pair in self.pairs:
+            df = self.get_historical_quotes(
+                pair,
+                date=date,
+                time_start=time_start,
+                time_end=time_end,
+                limit=limit,
+            )
+            if not df.empty:
+                df["Pair"] = pair
+                frames.append(df)
+
+        if not frames:
+            self.logger.warning("No historical quote data loaded")
+            self.continue_backtest = False
+            self._quote_iter = iter([])
+            return
+
+        merged = pd.concat(frames).sort_index()
+        self._quote_iter = merged.iterrows()
+        self.continue_backtest = True
+
+    def stream_next_tick(self):
+        """
+        Replay the next historical quote as a TickEvent.
+        Compatible with the Backtest runner.
+        """
+        try:
+            index, row = next(self._quote_iter)
+        except StopIteration:
+            self.continue_backtest = False
+            return
+
+        getcontext().rounding = ROUND_HALF_DOWN
+        pair = row["Pair"]
+        bid = Decimal(str(row["bid_price"])).quantize(Decimal("0.00001"))
+        ask = Decimal(str(row["ask_price"])).quantize(Decimal("0.00001"))
+
+        self.prices[pair]["bid"] = bid
+        self.prices[pair]["ask"] = ask
+        self.prices[pair]["time"] = index
+
+        tev = TickEvent(pair, index, bid, ask)
+        self.events_queue.put(tev)
+
+    # ── WebSocket real-time streaming ─────────────────────────────
+
+    def _build_hello_message(self):
+        """
+        Build the CoinAPI WebSocket 'hello' message to subscribe
+        to real-time quote updates for the configured pairs.
+        """
+        symbol_ids = [
+            _pair_to_coinapi_symbol(p, self.exchange, self.market) + "$"
+            for p in self.pairs
+        ]
+        return json.dumps({
+            "type": "hello",
+            "apikey": self.api_key,
+            "heartbeat": self.heartbeat,
+            "subscribe_data_type": ["quote"],
+            "subscribe_filter_symbol_id": symbol_ids,
+        })
+
+    def _on_ws_open(self, ws):
+        self.logger.info("CoinAPI WebSocket opened — sending hello")
+        hello = self._build_hello_message()
+        ws.send(hello)
+
+    def _on_ws_message(self, ws, message):
+        try:
+            msg = json.loads(message)
+        except json.JSONDecodeError as e:
+            self.logger.error("CoinAPI WS JSON decode error: %s", e)
+            return
+
+        msg_type = msg.get("type", "")
+
+        if msg_type == "hearbeat":
+            return  # CoinAPI spells it "hearbeat" (no 't')
+
+        if msg_type == "error":
+            self.logger.error("CoinAPI WS error: %s", msg.get("message"))
+            return
+
+        if msg_type == "reconnect":
+            self.logger.warning(
+                "CoinAPI WS reconnect requested within %s seconds",
+                msg.get("within_seconds"),
+            )
+            return
+
+        if msg_type != "quote":
+            return  # Ignore unexpected message types
+
+        symbol_id = msg.get("symbol_id", "")
+        pair = self._symbol_map.get(symbol_id)
+        if pair is None:
+            # Try partial match (prefix)
+            for sid, p in self._symbol_map.items():
+                if symbol_id.startswith(sid.rstrip("$")):
+                    pair = p
+                    break
+        if pair is None:
+            self.logger.debug("Ignoring quote for unknown symbol: %s", symbol_id)
+            return
+
+        getcontext().rounding = ROUND_HALF_DOWN
+        bid = Decimal(str(msg["bid_price"])).quantize(Decimal("0.00001"))
+        ask = Decimal(str(msg["ask_price"])).quantize(Decimal("0.00001"))
+        time_val = msg.get("time_exchange", msg.get("time_coinapi", ""))
+
+        self.prices[pair]["bid"] = bid
+        self.prices[pair]["ask"] = ask
+        self.prices[pair]["time"] = time_val
+
+        tev = TickEvent(pair, time_val, bid, ask)
+        self.events_queue.put(tev)
+
+    def _on_ws_error(self, ws, error):
+        self.logger.error("CoinAPI WebSocket error: %s", error)
+
+    def _on_ws_close(self, ws, close_status_code, close_msg):
+        self.logger.info(
+            "CoinAPI WebSocket closed: %s %s", close_status_code, close_msg
+        )
+
+    def stream_to_queue(self):
+        """
+        Connect to CoinAPI WebSocket and stream real-time quotes.
+        Blocks the calling thread (run in a separate thread).
+        """
+        self.logger.info("Connecting to CoinAPI WebSocket: %s", self.ws_url)
+        self.ws = websocket.WebSocketApp(
+            self.ws_url,
+            on_open=self._on_ws_open,
+            on_message=self._on_ws_message,
+            on_error=self._on_ws_error,
+            on_close=self._on_ws_close,
+        )
+        self.ws.run_forever(ping_interval=30)
+
+    def stop(self):
+        """Close the WebSocket connection."""
+        if self.ws:
+            self.ws.close()
+
+
+
