@@ -9,7 +9,7 @@ except:
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from qsforex.settings import OUTPUT_RESULTS_DIR
+from qsCrypto.settings import OUTPUT_RESULTS_DIR
 
 
 if __name__ == "__main__":

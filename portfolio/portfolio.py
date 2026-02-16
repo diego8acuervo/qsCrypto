@@ -7,15 +7,15 @@ import os
 
 import pandas as pd
 
-from qsforex.event.event import OrderEvent
-from qsforex.performance.performance import create_drawdowns
-from qsforex.portfolio.position import Position
-from qsforex.settings import OUTPUT_RESULTS_DIR
+from qsCrypto.event.event import OrderEvent
+from qsCrypto.performance.performance import create_drawdowns
+from qsCrypto.portfolio.position import Position
+from qsCrypto.settings import OUTPUT_RESULTS_DIR
 
 
 class Portfolio(object):
     def __init__(
-        self, ticker, events, home_currency="GBP", 
+        self, ticker, events, home_currency="USDT", 
         leverage=20, equity=Decimal("100000.00"), 
         risk_per_trade=Decimal("0.02"), backtest=True
     ):
@@ -27,14 +27,29 @@ class Portfolio(object):
         self.balance = deepcopy(self.equity)
         self.risk_per_trade = risk_per_trade
         self.backtest = backtest
-        self.trade_units = self.calc_risk_position_size()
         self.positions = {}
         if self.backtest:
             self.backtest_file = self.create_equity_file()
         self.logger = logging.getLogger(__name__)
 
-    def calc_risk_position_size(self):
-        return self.equity * self.risk_per_trade
+    def calc_risk_position_size(self, currency_pair):
+        """
+        Dynamically calculate the number of units to trade
+        based on current price, equity, and risk per trade.
+        For crypto pairs (e.g. BTCUSDT), the units are
+        (equity * risk_per_trade) / current_price.
+        """
+        tp = self.ticker.prices
+        if currency_pair not in tp or tp[currency_pair]["ask"] is None:
+            self.logger.warning(
+                "No price available for %s, returning 0 units", currency_pair
+            )
+            return Decimal("0")
+        current_price = Decimal(str(tp[currency_pair]["ask"]))
+        if current_price == 0:
+            return Decimal("0")
+        units = (self.equity * self.risk_per_trade) / current_price
+        return units.quantize(Decimal("0.00001"), ROUND_HALF_DOWN)
 
     def add_new_position(
         self, position_type, currency_pair, units, ticker
@@ -142,8 +157,15 @@ class Portfolio(object):
         if execute:
             side = signal_event.side
             currency_pair = signal_event.instrument
-            units = int(self.trade_units)
+            units = self.calc_risk_position_size(currency_pair)
             time = signal_event.time
+
+            # Guard against zero units
+            if units <= 0:
+                self.logger.warning(
+                    "Calculated 0 units for %s — skipping order", currency_pair
+                )
+                return
             
             # If there is no position, create one
             if currency_pair not in self.positions:
@@ -161,7 +183,7 @@ class Portfolio(object):
                 ps = self.positions[currency_pair]
 
                 if side == "buy" and ps.position_type == "long":
-                    add_position_units(currency_pair, units)
+                    self.add_position_units(currency_pair, units)
 
                 elif side == "sell" and ps.position_type == "long":
                     if units == ps.units:
@@ -182,7 +204,7 @@ class Portfolio(object):
                         return
                         
                 elif side == "sell" and ps.position_type == "short":
-                    add_position_units(currency_pair, units)
+                    self.add_position_units(currency_pair, units)
 
             order = OrderEvent(currency_pair, units, "market", side)
             self.events.put(order)
@@ -190,4 +212,3 @@ class Portfolio(object):
             self.logger.info("Portfolio Balance: %s" % self.balance)
         else:
             self.logger.info("Unable to execute order as price data was insufficient.")
-        

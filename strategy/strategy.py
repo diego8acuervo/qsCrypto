@@ -1,6 +1,6 @@
 import copy
 
-from qsforex.event.event import SignalEvent
+from qsCrypto.event.event import SignalEvent
 
 
 class TestStrategy(object):

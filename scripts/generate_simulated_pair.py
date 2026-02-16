@@ -9,7 +9,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-from qsforex import settings
+from qsCrypto import settings
 
 
 def month_weekdays(year_int, month_int):

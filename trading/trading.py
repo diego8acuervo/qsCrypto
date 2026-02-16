@@ -2,6 +2,7 @@ import copy
 from decimal import Decimal, getcontext
 import logging
 import logging.config
+import os
 try:
     import Queue as queue
 except ImportError:
@@ -9,11 +10,11 @@ except ImportError:
 import threading
 import time
 
-from qsforex.execution.execution import OANDAExecutionHandler
-from qsforex.portfolio.portfolio import Portfolio
-from qsforex import settings
-from qsforex.strategy.strategy import TestStrategy
-from qsforex.data.streaming import StreamingForexPrices
+from qsCrypto.execution.execution import create_execution_handler
+from qsCrypto.portfolio.portfolio import Portfolio
+from qsCrypto import settings
+from qsCrypto.strategy.strategy import TestStrategy
+from qsCrypto.data.streaming import StreamingCryptoPrices
 
 
 def trade(events, strategy, portfolio, execution, heartbeat):
@@ -46,43 +47,42 @@ def trade(events, strategy, portfolio, execution, heartbeat):
 
 if __name__ == "__main__":
     # Set up logging
-    logging.config.fileConfig('../logging.conf')
-    logger = logging.getLogger('qsforex.trading.trading')
+    log_conf_path = os.path.join(os.path.dirname(__file__), '..', 'logging.conf')
+    logging.config.fileConfig(log_conf_path)
+    logger = logging.getLogger('qsCrypto.trading.trading')
 
     # Set the number of decimal places to 2
     getcontext().prec = 2
 
-    heartbeat = 0.0  # Time in seconds between polling
+    heartbeat = 0.5  # Time in seconds between polling
     events = queue.Queue()
     equity = settings.EQUITY
 
     # Pairs to include in streaming data set
-    pairs = ["EURUSD", "GBPUSD"]
+    pairs = ["BTCUSDT", "ETHUSDT"]
 
-    # Create the OANDA market price streaming class
-    # making sure to provide authentication commands
-    prices = StreamingForexPrices(
-        settings.STREAM_DOMAIN, settings.ACCESS_TOKEN, 
-        settings.ACCOUNT_ID, pairs, events
+    # Create the Binance market price streaming class
+    prices = StreamingCryptoPrices(
+        pairs=pairs,
+        events_queue=events,
+        test_mode=settings.TEST_MODE,
+        market_type=settings.BINANCE_MARKET_TYPE,
     )
 
     # Create the strategy/signal generator, passing the 
     # instrument and the events queue
     strategy = TestStrategy(pairs, events)
 
-    # Create the portfolio object that will be used to
-    # compare the OANDA positions with the local, to
-    # ensure backtesting integrity.
+    # Create the portfolio object
     portfolio = Portfolio(
-        prices, events, equity=equity, backtest=False
+        prices, events, home_currency="USDT",
+        equity=equity, backtest=False
     )
 
-    # Create the execution handler making sure to
-    # provide authentication commands
-    execution = OANDAExecutionHandler(
-        settings.API_DOMAIN, 
-        settings.ACCESS_TOKEN, 
-        settings.ACCOUNT_ID
+    # Create the execution handler
+    execution = create_execution_handler(
+        test_mode=settings.TEST_MODE,
+        market_type=settings.BINANCE_MARKET_TYPE,
     )
     
     # Create two separate threads: One for the trading loop
@@ -99,3 +99,4 @@ if __name__ == "__main__":
     trade_thread.start()
     logger.info("Starting price streaming thread")
     price_thread.start()
+

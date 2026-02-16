@@ -10,8 +10,8 @@ import time
 import numpy as np
 import pandas as pd
 
-from qsforex import settings
-from qsforex.event.event import TickEvent
+from qsCrypto import settings
+from qsCrypto.event.event import TickEvent
 
 
 class PriceHandler(object):
@@ -25,7 +25,7 @@ class PriceHandler(object):
 
     This will replicate how a live strategy would function as current
     tick data would be streamed via a brokerage. Thus a historic and live
-    system will be treated identically by the rest of the QSForex 
+    system will be treated identically by the rest of the qsCrypto 
     backtesting suite.
     """
 

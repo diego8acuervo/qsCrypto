@@ -1,92 +1,103 @@
 from __future__ import print_function
 
 from decimal import Decimal, getcontext, ROUND_HALF_DOWN
-import logging
 import json
+import logging
+import threading
 
-import requests
+import websocket
 
-from qsforex.event.event import TickEvent
-from qsforex.data.price import PriceHandler
+from qsCrypto.event.event import TickEvent
+from qsCrypto.data.price import PriceHandler
+from qsCrypto import settings
 
 
-class StreamingForexPrices(PriceHandler):
-    def __init__(
-        self, domain, access_token, 
-        account_id, pairs, events_queue
-    ):
-        self.domain = domain
-        self.access_token = access_token
-        self.account_id = account_id
-        self.events_queue = events_queue
+class StreamingCryptoPrices(PriceHandler):
+    """
+    Connects to Binance WebSocket book-ticker streams and
+    places TickEvents onto the events queue.
+    """
+
+    def __init__(self, pairs, events_queue, test_mode=True, market_type="usdm_futures"):
         self.pairs = pairs
+        self.events_queue = events_queue
+        self.test_mode = test_mode
+        self.market_type = market_type
         self.prices = self._set_up_prices_dict()
         self.logger = logging.getLogger(__name__)
 
-    def invert_prices(self, pair, bid, ask):
-        """
-        Simply inverts the prices for a particular currency pair.
-        This will turn the bid/ask of "GBPUSD" into bid/ask for
-        "USDGBP" and place them in the prices dictionary.
-        """
-        getcontext().rounding = ROUND_HALF_DOWN
-        inv_pair = "%s%s" % (pair[3:], pair[:3])
-        inv_bid = (Decimal("1.0")/bid).quantize(
-            Decimal("0.00001")
-        )
-        inv_ask = (Decimal("1.0")/ask).quantize(
-            Decimal("0.00001")
-        )
-        return inv_pair, inv_bid, inv_ask
+        env_label = "testnet" if test_mode else "production"
+        self.ws_base_url = settings.BINANCE_ENVIRONMENTS[market_type]["streaming"][env_label]
 
-    def connect_to_stream(self):
-        pairs_oanda = ["%s_%s" % (p[:3], p[3:]) for p in self.pairs]
-        pair_list = ",".join(pairs_oanda)
+    def _set_up_prices_dict(self):
+        """
+        For crypto we don't need inverse pairs like forex.
+        Just set up one entry per pair.
+        """
+        return {
+            p: {"bid": None, "ask": None, "time": None}
+            for p in self.pairs
+        }
+
+    def _build_ws_url(self):
+        """
+        Build a combined stream URL like:
+        wss://stream.binancefuture.com/stream?streams=btcusdt@bookTicker/ethusdt@bookTicker
+        """
+        streams = "/".join(
+            f"{pair.lower()}@bookTicker" for pair in self.pairs
+        )
+        return f"{self.ws_base_url}/stream?streams={streams}"
+
+    def _on_message(self, ws, message):
         try:
-            requests.packages.urllib3.disable_warnings()
-            s = requests.Session()
-            url = "https://" + self.domain + "/v1/prices"
-            headers = {'Authorization' : 'Bearer ' + self.access_token}
-            params = {'instruments' : pair_list, 'accountId' : self.account_id}
-            req = requests.Request('GET', url, headers=headers, params=params)
-            pre = req.prepare()
-            resp = s.send(pre, stream=True, verify=False)
-            return resp
+            msg = json.loads(message)
+            data = msg.get("data", msg)
+
+            symbol = data.get("s", "").upper()
+            if symbol not in self.prices:
+                return
+
+            getcontext().rounding = ROUND_HALF_DOWN
+            bid = Decimal(str(data["b"])).quantize(Decimal("0.00001"))
+            ask = Decimal(str(data["a"])).quantize(Decimal("0.00001"))
+            time_val = str(data.get("T", data.get("E", "")))
+
+            self.prices[symbol]["bid"] = bid
+            self.prices[symbol]["ask"] = ask
+            self.prices[symbol]["time"] = time_val
+
+            tev = TickEvent(symbol, time_val, bid, ask)
+            self.events_queue.put(tev)
+
         except Exception as e:
-            s.close()
-            print("Caught exception when connecting to stream\n" + str(e))
+            self.logger.error("Error processing WS message: %s", e)
+
+    def _on_error(self, ws, error):
+        self.logger.error("WebSocket error: %s", error)
+
+    def _on_close(self, ws, close_status_code, close_msg):
+        self.logger.info("WebSocket closed: %s %s", close_status_code, close_msg)
+
+    def _on_open(self, ws):
+        self.logger.info("WebSocket connection opened")
 
     def stream_to_queue(self):
-        response = self.connect_to_stream()
-        if response.status_code != 200:
-            return
-        for line in response.iter_lines(1):
-            if line:
-                try:
-                    dline = line.decode('utf-8')
-                    msg = json.loads(dline)
-                except Exception as e:
-                    self.logger.error(
-                        "Caught exception when converting message into json: %s" % str(e)
-                    )
-                    return
-                if "instrument" in msg or "tick" in msg:
-                    self.logger.debug(msg)
-                    getcontext().rounding = ROUND_HALF_DOWN 
-                    instrument = msg["tick"]["instrument"].replace("_", "")
-                    time = msg["tick"]["time"]
-                    bid = Decimal(str(msg["tick"]["bid"])).quantize(
-                        Decimal("0.00001")
-                    )
-                    ask = Decimal(str(msg["tick"]["ask"])).quantize(
-                        Decimal("0.00001")
-                    )
-                    self.prices[instrument]["bid"] = bid
-                    self.prices[instrument]["ask"] = ask
-                    # Invert the prices (GBP_USD -> USD_GBP)
-                    inv_pair, inv_bid, inv_ask = self.invert_prices(instrument, bid, ask)
-                    self.prices[inv_pair]["bid"] = inv_bid
-                    self.prices[inv_pair]["ask"] = inv_ask
-                    self.prices[inv_pair]["time"] = time
-                    tev = TickEvent(instrument, time, bid, ask)
-                    self.events_queue.put(tev)
+        """
+        Connect to the Binance WebSocket and start streaming.
+        Blocks the calling thread.
+        """
+        url = self._build_ws_url()
+        self.logger.info("Connecting to WebSocket: %s", url)
+        self.ws = websocket.WebSocketApp(
+            url,
+            on_message=self._on_message,
+            on_error=self._on_error,
+            on_close=self._on_close,
+            on_open=self._on_open,
+        )
+        self.ws.run_forever()
+
+    def stop(self):
+        if hasattr(self, "ws") and self.ws:
+            self.ws.close()

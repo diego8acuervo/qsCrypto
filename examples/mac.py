@@ -1,11 +1,11 @@
 from __future__ import print_function
 
-from qsforex.backtest.backtest import Backtest
-from qsforex.execution.execution import SimulatedExecution
-from qsforex.portfolio.portfolio import Portfolio
-from qsforex import settings
-from qsforex.strategy.strategy import MovingAverageCrossStrategy
-from qsforex.data.price import HistoricCSVPriceHandler
+from qsCrypto.backtest.backtest import Backtest
+from qsCrypto.execution.execution import SimulatedExecution
+from qsCrypto.portfolio.portfolio import Portfolio
+from qsCrypto import settings
+from qsCrypto.strategy.strategy import MovingAverageCrossStrategy
+from qsCrypto.data.price import HistoricCSVPriceHandler
 
 
 if __name__ == "__main__":

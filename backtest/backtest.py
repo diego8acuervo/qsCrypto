@@ -6,7 +6,7 @@ except ImportError:
     import queue
 import time
 
-from qsforex import settings
+from qsCrypto import settings
 
 
 class Backtest(object):

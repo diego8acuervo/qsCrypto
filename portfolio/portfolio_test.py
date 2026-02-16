@@ -1,9 +1,9 @@
 from decimal import Decimal, getcontext, ROUND_HALF_DOWN
 import unittest
 
-from qsforex.portfolio.portfolio import Portfolio
-from qsforex.portfolio.position_test import TickerMock
-from qsforex.portfolio.position import Position
+from qsCrypto.portfolio.portfolio import Portfolio
+from qsCrypto.portfolio.position_test import TickerMock
+from qsCrypto.portfolio.position import Position
 
 
 class TestPortfolio(unittest.TestCase):

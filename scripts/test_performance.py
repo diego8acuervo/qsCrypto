@@ -12,8 +12,8 @@ import os
 
 import pandas as pd
 
-from qsforex.performance.performance import create_drawdowns
-from qsforex.settings import OUTPUT_RESULTS_DIR
+from qsCrypto.performance.performance import create_drawdowns
+from qsCrypto.settings import OUTPUT_RESULTS_DIR
 
 
 if __name__ == "__main__":
