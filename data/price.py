@@ -243,7 +243,7 @@ class CoinAPIPriceHandler(PriceHandler):
 
     Both modes produce TickEvents compatible with the rest of qsCrypto.
 
-    Parameters
+    Parameters54
     ----------
     pairs : list[str]
         Internal pair names, e.g. ["BTCUSDT", "ETHUSDT"].
@@ -575,5 +575,75 @@ class CoinAPIPriceHandler(PriceHandler):
         if self.ws:
             self.ws.close()
 
+    """
+    Bitget price handler that can:
+      1. Download historical OHLCV / quote data via the REST API
+      2. Stream real-time quote (bid/ask) data via the WebSocket API
 
+    Both modes produce TickEvents compatible with the rest of qsCrypto.
 
+    Parameters
+    ----------
+    pairs : list[str]
+        Internal pair names, e.g. ["BTCUSDT", "ETHUSDT"].
+    events_queue : queue.Queue
+        The events queue shared with the trading loop.
+    api_key : str
+        Bitget API key.
+    secret_key : str
+        Bitget API secret key.
+    passphrase : str
+        Bitget API passphrase.
+    rest_base_url : str
+        Base URL for the Bitget REST API.
+    ws_url : str
+        WebSocket endpoint for real-time streaming.
+    """
+
+    REST_BASE_URL = "https://api.bitget.com/api/swap/v3"
+    WS_URL = "wss://ws.bitget.com/stream"
+
+    def __init__(
+        self,
+        pairs,
+        events_queue,
+        api_key=None,
+        secret_key=None,
+        passphrase=None,
+        rest_base_url=None,
+        ws_url=None,
+    ):
+
+    Both modes produce TickEvents compatible with the rest of qsCrypto.
+
+    Parameters
+    ----------
+    pairs : list[str]
+        Internal pair names, e.g. ["BTCUSDT", "ETHUSDT"].
+    events_queue : queue.Queue
+        The events queue shared with the trading loop.
+    api_key : str
+        Bitget API key.
+    secret_key : str
+        Bitget API secret key.
+    passphrase : str
+        Bitget API passphrase.
+    rest_base_url : str
+        Base URL for the Bitget REST API.
+    ws_url : str
+        WebSocket endpoint for real-time streaming.
+    """
+
+    REST_BASE_URL = "https://api.bitget.com/api/swap/v3"
+    WS_URL = "wss://ws.bitget.com/stream"
+
+    def __init__(
+        self,
+        pairs,
+        events_queue,
+        api_key=None,
+        secret_key=None,
+        passphrase=None,
+        rest_base_url=None,
+        ws_url=None,
+    ):
